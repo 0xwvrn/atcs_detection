@@ -1,0 +1,9 @@
+path: /Users/dhritiman/Documents/dev/atcs/model_training/dataset
+train:
+- images/train
+- images/train_visdrone
+val:
+- images/val
+- images/val_visdrone
+names:
+  0: vehicle
