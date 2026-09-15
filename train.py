@@ -15,14 +15,16 @@ def detect_device():
 
 
 def parse_args():
-    default_data = Path(__file__).resolve().parent / "configs" / "data.yaml"
+    default_data = Path(__file__).resolve().parent / "configs" / "data_combined.yaml"
+    if not default_data.exists():
+        default_data = Path(__file__).resolve().parent / "configs" / "data.yaml"
 
-    parser = argparse.ArgumentParser(description="Train ATCS Vehicle Detection Model on UA-DETRAC dataset.")
+    parser = argparse.ArgumentParser(description="Train High-Recall ATCS Vehicle Detector (Memory Safe).")
     parser.add_argument(
         "--model",
         type=str,
-        default="yolov8n.pt",
-        help="Initial model weights or architecture definition (default: yolov8n.pt).",
+        default="yolov8n-p2.yaml",
+        help="Model architecture or weights file (e.g., yolov8n-p2.yaml, yolov8n.pt, yolo11n.pt).",
     )
     parser.add_argument(
         "--data",
@@ -33,32 +35,92 @@ def parse_args():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=50,
-        help="Number of training epochs (default: 50).",
+        default=60,
+        help="Number of training epochs (default: 60).",
     )
     parser.add_argument(
         "--batch",
         type=int,
-        default=16,
-        help="Training batch size (default: 16).",
+        default=8,
+        help="Batch size (default: 8 for safe 960px memory footprint on 16GB Mac).",
     )
     parser.add_argument(
         "--imgsz",
         type=int,
-        default=640,
-        help="Input image resolution (default: 640).",
+        default=960,
+        help="Input image resolution (default: 960 for high small-vehicle recall).",
+    )
+    parser.add_argument(
+        "--rect",
+        action="store_true",
+        default=True,
+        help="Enable 16:9 rectangular training (no square distortion).",
+    )
+    parser.add_argument(
+        "--no-rect",
+        dest="rect",
+        action="store_false",
+        help="Disable rectangular training and use standard square letterboxing.",
+    )
+    parser.add_argument(
+        "--cls",
+        type=float,
+        default=1.5,
+        help="Classification loss gain (default: 1.5 to penalize missed detections and boost Recall).",
+    )
+    parser.add_argument(
+        "--box",
+        type=float,
+        default=7.5,
+        help="Bounding box loss gain (default: 7.5).",
+    )
+    parser.add_argument(
+        "--dfl",
+        type=float,
+        default=1.5,
+        help="Distribution Focal Loss gain (default: 1.5).",
+    )
+    parser.add_argument(
+        "--cos-lr",
+        action="store_true",
+        default=True,
+        help="Use cosine learning rate scheduler (default: True).",
+    )
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="AdamW",
+        help="Optimizer (default: 'AdamW' for smooth gradient convergence).",
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=0.6,
+        help="Scale augmentation gain for multi-scale vehicle learning (default: 0.6).",
+    )
+    parser.add_argument(
+        "--mosaic",
+        type=float,
+        default=1.0,
+        help="Mosaic augmentation probability (default: 1.0).",
+    )
+    parser.add_argument(
+        "--close-mosaic",
+        type=int,
+        default=10,
+        help="Disable mosaic for the final N epochs for sharp fine-tuning (default: 10).",
     )
     parser.add_argument(
         "--device",
         type=str,
         default=None,
-        help="Device to run training on ('0', 'mps', 'cpu'). Auto-detects if omitted.",
+        help="Device to run on (e.g., '0', 'mps', 'cpu'). If not specified, auto-detects.",
     )
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="Number of worker threads for DataLoader (default: 4).",
+        default=2,
+        help="Number of DataLoader worker threads (default: 2 for low RAM overhead).",
     )
     parser.add_argument(
         "--project",
@@ -69,8 +131,8 @@ def parse_args():
     parser.add_argument(
         "--name",
         type=str,
-        default="atcs_vehicle_detector",
-        help="Experiment name for saving run logs and weights.",
+        default="atcs_high_recall_model",
+        help="Name of this specific training run.",
     )
     parser.add_argument(
         "--resume",
@@ -97,30 +159,48 @@ def main():
         sys.exit(1)
 
     print("=" * 70)
-    print(" ATCS Vehicle Detector Model Training")
+    print(" ATCS High-Recall Vehicle Detector Training (Memory-Safe Mode)")
     print("=" * 70)
-    print(f" Model:      {args.model}")
-    print(f" Dataset:    {data_yaml}")
-    print(f" Epochs:     {args.epochs}")
-    print(f" Batch Size: {args.batch}")
-    print(f" Image Size: {args.imgsz}")
-    print(f" Device:     {device.upper()}")
-    print(f" Output:     {args.project}/{args.name}")
+    print(f" Model Architecture:  {args.model}")
+    print(f" Dataset Config:      {data_yaml}")
+    print(f" Target Device:       {device.upper()}")
+    print(f" Image Resolution:    {args.imgsz}px (Rectangular: {args.rect})")
+    print(f" Safe Batch Size:     {args.batch} (Gradient Accumulation Active)")
+    print(f" Epochs:              {args.epochs} (Close-mosaic: {args.close_mosaic})")
+    print(f" Optimizer:           {args.optimizer} (Cosine LR: {args.cos_lr})")
+    print(f" Loss Weights:        cls={args.cls} (Recall-Boosted), box={args.box}, dfl={args.dfl}")
+    print(f" DataLoader Workers:  {args.workers} (RAM-Safe Mode, cache=False)")
+    print(f" Output Project:      {args.project}/{args.name}")
     print("=" * 70)
 
-    model = YOLO(args.model)
+    # Loads custom architecture with pretrained backbone weights if yaml specified
+    if args.model.endswith(".yaml"):
+        model = YOLO(args.model).load("yolov8n.pt")
+    else:
+        model = YOLO(args.model)
 
     results = model.train(
         data=str(data_yaml),
         epochs=args.epochs,
         batch=args.batch,
         imgsz=args.imgsz,
+        rect=args.rect,
+        cls=args.cls,
+        box=args.box,
+        dfl=args.dfl,
+        cos_lr=args.cos_lr,
+        optimizer=args.optimizer,
+        scale=args.scale,
+        mosaic=args.mosaic,
+        close_mosaic=args.close_mosaic,
         device=device,
         workers=args.workers,
+        cache=False,
         project=args.project,
         name=args.name,
         resume=args.resume,
         exist_ok=True,
+        pretrained=True,
         verbose=True,
         plots=True,
     )
@@ -132,12 +212,15 @@ def main():
     print("\n" + "=" * 70)
     print(" Evaluating Best Model on Validation Split...")
     print("=" * 70)
-    val_results = model.val(data=str(data_yaml), imgsz=args.imgsz, device=device)
+    val_results = model.val(data=str(data_yaml), imgsz=args.imgsz, rect=args.rect, device=device)
 
     best_weights_path = Path(args.project) / args.name / "weights" / "best.pt"
     print("\n" + "=" * 70)
-    print(" Training Complete!")
+    print(" TRAINING COMPLETE!")
+    print("=" * 70)
     print(f" Best Weights Saved To: {best_weights_path}")
+    print(f" Validation Recall:     {val_results.box.mr:.4f}  (Target: >= 0.80)")
+    print(f" Validation Precision:  {val_results.box.mp:.4f}")
     print(f" Validation mAP@50:     {val_results.box.map50:.4f}")
     print(f" Validation mAP@50-95:  {val_results.box.map:.4f}")
     print("=" * 70)
