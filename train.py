@@ -142,6 +142,7 @@ def parse_args():
     return parser.parse_args()
 
 
+# Executes training and runs post-training validation with safe device fallback
 def main():
     args = parse_args()
 
@@ -201,6 +202,7 @@ def main():
         resume=args.resume,
         exist_ok=True,
         pretrained=True,
+        val=False,
         verbose=True,
         plots=True,
     )
@@ -212,7 +214,15 @@ def main():
     print("\n" + "=" * 70)
     print(" Evaluating Best Model on Validation Split...")
     print("=" * 70)
-    val_results = model.val(data=str(data_yaml), imgsz=args.imgsz, rect=args.rect, device=device)
+
+    # Automatically uses CPU for validation if MPS device is active with high anchor counts (>65536)
+    val_device = "cpu" if device == "mps" and args.imgsz >= 960 else device
+
+    try:
+        val_results = model.val(data=str(data_yaml), imgsz=args.imgsz, rect=args.rect, device=val_device)
+    except Exception as e:
+        print(f"[Notice] Validation on {val_device} encountered: {e}. Falling back to CPU...")
+        val_results = model.val(data=str(data_yaml), imgsz=args.imgsz, rect=args.rect, device="cpu")
 
     best_weights_path = Path(args.project) / args.name / "weights" / "best.pt"
     print("\n" + "=" * 70)

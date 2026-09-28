@@ -8,9 +8,9 @@ import numpy as np
 
 
 def parse_args():
-    default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+    default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if not default_weights.exists():
-        default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_vehicle_detector" / "weights" / "best.pt"
+        default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
     if not default_weights.exists():
         default_weights = "yolov8n.pt"
 
@@ -19,13 +19,13 @@ def parse_args():
         "--weights",
         type=str,
         default=str(default_weights),
-        help="Path to trained model weights (.pt file).",
+        help="Path to trained model weights (.pt or .tflite file).",
     )
     parser.add_argument(
         "--source",
         type=str,
         required=True,
-        help="Source video file, RTSP stream URL, or webcam device index (e.g., 0).",
+        help="Source video file, image folder, RTSP stream URL, or webcam index (e.g., 0).",
     )
     parser.add_argument(
         "--tracker",
@@ -37,8 +37,8 @@ def parse_args():
     parser.add_argument(
         "--conf",
         type=float,
-        default=0.25,
-        help="Detection confidence threshold (default: 0.25).",
+        default=0.35,
+        help="Detection confidence threshold (default: 0.35).",
     )
     parser.add_argument(
         "--iou",
@@ -48,9 +48,10 @@ def parse_args():
     )
     parser.add_argument(
         "--imgsz",
+        nargs="+",
         type=int,
-        default=960,
-        help="Inference input image size (default: 960).",
+        default=[960],
+        help="Inference input image size (e.g., 960 or 320 192).",
     )
     parser.add_argument(
         "--save",
@@ -67,6 +68,12 @@ def parse_args():
         "--no-show",
         action="store_true",
         help="Do not display interactive video visualization window.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Execution device ('0', 'mps', 'cpu'). Auto-detects if omitted.",
     )
     return parser.parse_args()
 
@@ -180,6 +187,74 @@ def draw_tracking_hud(frame, queue_count, throughput_count, fps):
     )
 
 
+# Reads input video stream or image directory frame by frame
+def get_frame_generator(source_path):
+    src_str = str(source_path)
+
+    # Webcam or video capture device index
+    if src_str.isdigit():
+        cap = cv2.VideoCapture(int(src_str))
+        if not cap.isOpened():
+            return None, 0, 0, 25.0, "Webcam"
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+        def gen():
+            try:
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    yield frame
+            finally:
+                cap.release()
+
+        return gen(), w, h, fps, f"Webcam ({src_str})"
+
+    p = Path(src_str).resolve()
+
+    # Directory of sequential image frames
+    if p.is_dir():
+        img_files = sorted(list(p.glob("*.jpg")) + list(p.glob("*.png")) + list(p.glob("*.jpeg")))
+        if not img_files:
+            return None, 0, 0, 25.0, str(p)
+        first_frame = cv2.imread(str(img_files[0]))
+        h, w = first_frame.shape[:2]
+        fps = 25.0
+
+        def gen():
+            for img_file in img_files:
+                frame = cv2.imread(str(img_file))
+                if frame is not None:
+                    yield frame
+
+        return gen(), w, h, fps, f"Folder: {p.name} ({len(img_files)} frames)"
+
+    # Video file
+    if p.is_file():
+        cap = cv2.VideoCapture(str(p))
+        if not cap.isOpened():
+            return None, 0, 0, 25.0, str(p)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+
+        def gen():
+            try:
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    yield frame
+            finally:
+                cap.release()
+
+        return gen(), w, h, fps, f"Video File: {p.name}"
+
+    return None, 0, 0, 25.0, src_str
+
+
 def main():
     args = parse_args()
 
@@ -194,6 +269,8 @@ def main():
         print(f"Warning: Specified weights '{weights_path}' not found, falling back to 'yolov8n.pt'.")
         weights_path = "yolov8n.pt"
 
+    img_size = args.imgsz if len(args.imgsz) > 1 else args.imgsz[0]
+
     print("=" * 70)
     print(" ATCS Multi-Object Tracking & Throughput Engine")
     print("=" * 70)
@@ -201,28 +278,25 @@ def main():
     print(f" Tracker Config:    {args.tracker}")
     print(f" Video Source:      {args.source}")
     print(f" Confidence / IoU:  {args.conf} / {args.iou}")
-    print(f" Image Resolution:  {args.imgsz}px")
+    print(f" Image Resolution:  {img_size}")
     print("=" * 70)
 
     model = YOLO(str(weights_path))
     tracker_manager = VehicleTrafficTracker()
 
-    src_input = int(args.source) if args.source.isdigit() else args.source
-    cap = cv2.VideoCapture(src_input)
-
-    if not cap.isOpened():
-        print(f"Error: Could not open video source: {args.source}")
+    frame_gen, width, height, fps_in, src_label = get_frame_generator(args.source)
+    if frame_gen is None:
+        print(f"Error: Could not open video source or image directory: {args.source}")
         sys.exit(1)
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps_in = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    print(f"Streaming from: {src_label} ({width}x{height} @ {fps_in:.1f} FPS)")
 
     video_writer = None
     if args.save:
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_file = out_dir / f"tracking_{Path(str(args.source)).stem}.mp4"
+        src_stem = Path(str(args.source)).stem or "stream"
+        out_file = out_dir / f"tracking_{src_stem}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         video_writer = cv2.VideoWriter(str(out_file), fourcc, fps_in, (width, height))
         print(f"Saving tracking video stream to: {out_file}")
@@ -231,24 +305,24 @@ def main():
     frame_idx = 0
 
     try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-
+        for frame in frame_gen:
             curr_time = time.time()
             fps_calc = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0.0
             prev_time = curr_time
 
-            results = model.track(
-                source=frame,
-                persist=True,
-                tracker=args.tracker,
-                conf=args.conf,
-                iou=args.iou,
-                imgsz=args.imgsz,
-                verbose=False,
-            )
+            track_kwargs = {
+                "source": frame,
+                "persist": True,
+                "tracker": args.tracker,
+                "conf": args.conf,
+                "iou": args.iou,
+                "imgsz": img_size,
+                "verbose": False,
+            }
+            if args.device is not None:
+                track_kwargs["device"] = args.device
+
+            results = model.track(**track_kwargs)
 
             boxes = results[0].boxes.xyxy.cpu().numpy() if results[0].boxes is not None else []
             track_ids = results[0].boxes.id.int().cpu().numpy() if results[0].boxes is not None and results[0].boxes.id is not None else None
@@ -267,7 +341,6 @@ def main():
 
             frame_idx += 1
     finally:
-        cap.release()
         if video_writer is not None:
             video_writer.release()
         if not args.no_show:
@@ -275,6 +348,7 @@ def main():
 
     print("\n" + "=" * 70)
     print(" Tracking session completed.")
+    print(f" Total Processed Frames:     {frame_idx:,}")
     print(f" Total Cumulative Throughput: {tracker_manager.total_throughput_count} vehicles")
     print("=" * 70)
 
