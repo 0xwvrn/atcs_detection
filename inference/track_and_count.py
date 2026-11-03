@@ -1,109 +1,58 @@
+"""
+ATCS Multi-Object Tracking & Vehicle Queue / Throughput Counting.
+
+Performs persistent ByteTrack/BoT-SORT tracking, stop-line crossing throughput counting,
+and active track counting on videos, webcams, or image directories.
+"""
+
+import argparse
+from collections import defaultdict, deque
+from pathlib import Path
 import sys
 import time
-import argparse
-from pathlib import Path
-from collections import defaultdict, deque
 import cv2
 import numpy as np
 
 
 def parse_args():
-    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
-    default_weights = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
-    if not default_weights.exists():
-        default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
-    if not default_weights.exists():
-        default_weights = "yolov8n.pt"
+    base_dir = Path(__file__).resolve().parents[1]
+    default_weights = next(
+        (p for p in (
+            base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt",
+            base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt",
+        ) if p.exists()),
+        "yolov8n.pt",
+    )
 
     parser = argparse.ArgumentParser(description="ATCS Multi-Object Tracking & Vehicle Queue / Throughput Counting.")
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default=str(default_weights),
-        help="Path to trained model weights (.pt or .tflite file).",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        required=True,
-        help="Source video file, image folder, RTSP stream URL, or webcam index (e.g., 0).",
-    )
-    parser.add_argument(
-        "--tracker",
-        type=str,
-        default="bytetrack.yaml",
-        choices=["bytetrack.yaml", "botsort.yaml"],
-        help="Tracking algorithm configuration ('bytetrack.yaml' or 'botsort.yaml').",
-    )
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=0.35,
-        help="Detection confidence threshold (default: 0.35).",
-    )
-    parser.add_argument(
-        "--iou",
-        type=float,
-        default=0.45,
-        help="NMS IoU threshold (default: 0.45).",
-    )
-    parser.add_argument(
-        "--imgsz",
-        nargs="+",
-        type=int,
-        default=[960],
-        help="Inference input image size (e.g., 960 or 320 192).",
-    )
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="Save annotated tracking video to output directory.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=str(base_dir / "runs" / "tracking"),
-        help="Directory to save tracking output videos.",
-    )
-    parser.add_argument(
-        "--no-show",
-        action="store_true",
-        help="Do not display interactive video visualization window.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        help="Execution device ('0', 'mps', 'cpu'). Auto-detects if omitted.",
-    )
+    parser.add_argument("--weights", type=str, default=str(default_weights), help="Path to trained model weights (.pt or .tflite).")
+    parser.add_argument("--source", type=str, required=True, help="Video file, image folder, RTSP stream URL, or webcam index.")
+    parser.add_argument("--tracker", type=str, default="bytetrack.yaml", choices=["bytetrack.yaml", "botsort.yaml"], help="Tracking config.")
+    parser.add_argument("--conf", type=float, default=0.35, help="Detection confidence threshold (default: 0.35).")
+    parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (default: 0.45).")
+    parser.add_argument("--imgsz", nargs="+", type=int, default=[960], help="Inference image resolution (default: 960).")
+    parser.add_argument("--save", action="store_true", help="Save annotated tracking video to output directory.")
+    parser.add_argument("--output-dir", type=str, default=str(base_dir / "runs" / "tracking"), help="Directory to save tracking output videos.")
+    parser.add_argument("--no-show", action="store_true", help="Do not display interactive video visualization window.")
+    parser.add_argument("--device", type=str, default=None, help="Execution device ('0', 'mps', 'cpu', or None for auto).")
     return parser.parse_args()
 
 
-# Manages multi-object trajectory association, virtual line crossing, and queue occupancy counting
 class VehicleTrafficTracker:
+    """Manages multi-object trajectory association, virtual line crossing, and queue occupancy counting."""
+
     def __init__(self, line_y_ratio=0.65, history_len=30):
         self.track_history = defaultdict(lambda: deque(maxlen=history_len))
         self.counted_ids = set()
-        self.active_queue_ids = set()
         self.line_y_ratio = line_y_ratio
         self.total_throughput_count = 0
 
-    # Updates vehicle trajectory history and checks if a persistent Track ID crossed the stopline
     def process_tracks(self, frame, boxes, track_ids):
         h, w = frame.shape[:2]
         line_y = int(h * self.line_y_ratio)
 
         cv2.line(frame, (0, line_y), (w, line_y), (0, 165, 255), 2)
-        cv2.putText(
-            frame,
-            "STOPLINE",
-            (20, line_y - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 165, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(frame, "STOPLINE", (20, line_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2, cv2.LINE_AA)
 
         current_frame_ids = set()
 
@@ -113,86 +62,40 @@ class VehicleTrafficTracker:
                 current_frame_ids.add(tid)
 
                 x1, y1, x2, y2 = map(int, box)
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                self.track_history[tid].append((cx, cy))
 
-                self.track_history[tid].append((center_x, center_y))
-
-                # Evaluates directional line intersection using preceding trajectory history
+                # Directional top-to-bottom stopline crossing detection
                 if len(self.track_history[tid]) >= 2:
                     prev_y = self.track_history[tid][-2][1]
-                    if prev_y < line_y <= center_y and tid not in self.counted_ids:
+                    if prev_y < line_y <= cy and tid not in self.counted_ids:
                         self.counted_ids.add(tid)
                         self.total_throughput_count += 1
 
                 box_color = (0, 255, 0) if tid in self.counted_ids else (255, 200, 0)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-                cv2.putText(
-                    frame,
-                    f"ID: {tid}",
-                    (x1, max(20, y1 - 8)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    box_color,
-                    2,
-                    cv2.LINE_AA,
-                )
+                cv2.putText(frame, f"ID: {tid}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2, cv2.LINE_AA)
 
-                points = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
-                cv2.polylines(frame, [points], isClosed=False, color=(0, 255, 255), thickness=2)
+                pts = np.array(self.track_history[tid], dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(frame, [pts], isClosed=False, color=(0, 255, 255), thickness=2)
 
-        active_queue_count = len(current_frame_ids)
-        return active_queue_count, self.total_throughput_count
+        return len(current_frame_ids), self.total_throughput_count
 
 
-# Draws heads-up display overlay with active lane queue and cumulative throughput
 def draw_tracking_hud(frame, queue_count, throughput_count, fps):
     h, w = frame.shape[:2]
-    header_h = 65
-
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, header_h), (15, 15, 15), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 65), (15, 15, 15), -1)
     cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
 
-    cv2.putText(
-        frame,
-        f"ACTIVE QUEUE: {queue_count}",
-        (15, 42),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.85,
-        (0, 255, 128),
-        2,
-        cv2.LINE_AA,
-    )
-
-    cv2.putText(
-        frame,
-        f"TOTAL PASSED: {throughput_count}",
-        (w // 2 - 80, 42),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.85,
-        (0, 200, 255),
-        2,
-        cv2.LINE_AA,
-    )
-
-    cv2.putText(
-        frame,
-        f"FPS: {fps:.1f}",
-        (w - 140, 42),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.75,
-        (200, 200, 200),
-        2,
-        cv2.LINE_AA,
-    )
+    cv2.putText(frame, f"ACTIVE QUEUE: {queue_count}", (15, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 128), 2, cv2.LINE_AA)
+    cv2.putText(frame, f"TOTAL PASSED: {throughput_count}", (w // 2 - 80, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 200, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, f"FPS: {fps:.1f}", (w - 140, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 200, 200), 2, cv2.LINE_AA)
 
 
-# Reads input video stream or image directory frame by frame
 def get_frame_generator(source_path):
     src_str = str(source_path)
 
-    # Webcam or video capture device index
     if src_str.isdigit():
         cap = cv2.VideoCapture(int(src_str))
         if not cap.isOpened():
@@ -215,14 +118,14 @@ def get_frame_generator(source_path):
 
     p = Path(src_str).resolve()
 
-    # Directory of sequential image frames
     if p.is_dir():
-        img_files = sorted(list(p.glob("*.jpg")) + list(p.glob("*.png")) + list(p.glob("*.jpeg")))
+        img_files = sorted([f for f in p.iterdir() if f.suffix.lower() in {".jpg", ".png", ".jpeg"}])
         if not img_files:
             return None, 0, 0, 25.0, str(p)
         first_frame = cv2.imread(str(img_files[0]))
+        if first_frame is None:
+            return None, 0, 0, 25.0, str(p)
         h, w = first_frame.shape[:2]
-        fps = 25.0
 
         def gen():
             for img_file in img_files:
@@ -230,9 +133,8 @@ def get_frame_generator(source_path):
                 if frame is not None:
                     yield frame
 
-        return gen(), w, h, fps, f"Folder: {p.name} ({len(img_files)} frames)"
+        return gen(), w, h, 25.0, f"Folder: {p.name} ({len(img_files)} frames)"
 
-    # Video file
     if p.is_file():
         cap = cv2.VideoCapture(str(p))
         if not cap.isOpened():
@@ -311,19 +213,16 @@ def main():
             fps_calc = 1.0 / (curr_time - prev_time) if (curr_time - prev_time) > 0 else 0.0
             prev_time = curr_time
 
-            track_kwargs = {
-                "source": frame,
-                "persist": True,
-                "tracker": args.tracker,
-                "conf": args.conf,
-                "iou": args.iou,
-                "imgsz": img_size,
-                "verbose": False,
-            }
-            if args.device is not None:
-                track_kwargs["device"] = args.device
-
-            results = model.track(**track_kwargs)
+            results = model.track(
+                source=frame,
+                persist=True,
+                tracker=args.tracker,
+                conf=args.conf,
+                iou=args.iou,
+                imgsz=img_size,
+                device=args.device,
+                verbose=False,
+            )
 
             boxes = results[0].boxes.xyxy.cpu().numpy() if results[0].boxes is not None else []
             track_ids = results[0].boxes.id.int().cpu().numpy() if results[0].boxes is not None and results[0].boxes.id is not None else None

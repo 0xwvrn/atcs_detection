@@ -1,160 +1,100 @@
+"""
+ATCS Traffic Counting & Multi-Object Tracking Benchmark Suite.
+
+Evaluates YOLO detection and MOT tracking against UA-DETRAC XML ground truth.
+Computes TP, FP, FN, ID switches, per-frame counting error (MAE/RMSE), and throughput metrics.
+"""
+
+import argparse
+import csv
+import json
+from pathlib import Path
 import sys
 import time
-import json
-import argparse
 import xml.etree.ElementTree as ET
-from pathlib import Path
-from collections import defaultdict
-import numpy as np
 import cv2
-from tqdm import tqdm
+import numpy as np
 from scipy.optimize import linear_sum_assignment
+from tqdm import tqdm
 
 
 def parse_args():
-    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
-    default_weights = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
-    if not default_weights.exists():
-        default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
-    if not default_weights.exists():
-        default_weights = "yolov8n.pt"
-
-    default_data_dir = base_dir.parent / "data" / "DETRAC"
+    base_dir = Path(__file__).resolve().parents[1]
+    default_weights = next(
+        (p for p in (
+            base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt",
+            base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt",
+        ) if p.exists()),
+        "yolov8n.pt",
+    )
 
     parser = argparse.ArgumentParser(description="ATCS Traffic Counting & Multi-Object Tracking Benchmark Suite.")
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default=str(default_weights),
-        help="Path to trained YOLO weights checkpoint (.pt file).",
-    )
-    parser.add_argument(
-        "--data-dir",
-        type=str,
-        default=str(default_data_dir),
-        help="Path to UA-DETRAC root directory containing DETRAC-Test-Annotations-XML and DETRAC-Images.",
-    )
-    parser.add_argument(
-        "--tracker",
-        type=str,
-        default="bytetrack.yaml",
-        choices=["bytetrack.yaml", "botsort.yaml"],
-        help="Tracking algorithm configuration file.",
-    )
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=0.25,
-        help="Detection confidence threshold (default: 0.25).",
-    )
-    parser.add_argument(
-        "--iou-thresh",
-        type=float,
-        default=0.50,
-        help="IoU threshold for bipartite ground-truth matching (default: 0.50).",
-    )
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=960,
-        help="Inference image resolution (default: 960).",
-    )
-    parser.add_argument(
-        "--num-sequences",
-        type=int,
-        default=None,
-        help="Maximum number of test sequences to benchmark (default: all available).",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        help="Device to run inference on ('0', 'mps', 'cpu'). Defaults to cpu for safe high-resolution anchor decoding.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=str(base_dir / "runs" / "benchmark"),
-        help="Directory to save benchmark metrics and summary tables.",
-    )
+    parser.add_argument("--weights", type=str, default=str(default_weights), help="Path to trained YOLO weights (.pt).")
+    parser.add_argument("--data-dir", type=str, default=str(base_dir.parent / "data" / "DETRAC"), help="Path to UA-DETRAC root directory.")
+    parser.add_argument("--tracker", type=str, default="bytetrack.yaml", choices=["bytetrack.yaml", "botsort.yaml"], help="Tracker configuration.")
+    parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold (default: 0.25).")
+    parser.add_argument("--iou-thresh", type=float, default=0.50, help="IoU threshold for bipartite matching (default: 0.50).")
+    parser.add_argument("--imgsz", type=int, default=960, help="Inference image resolution (default: 960).")
+    parser.add_argument("--num-sequences", type=int, default=None, help="Maximum number of test sequences to benchmark.")
+    parser.add_argument("--device", type=str, default="cpu", help="Device for inference: '0', 'mps', 'cpu' (default: cpu).")
+    parser.add_argument("--output-dir", type=str, default=str(base_dir / "runs" / "benchmark"), help="Directory to save benchmark metrics.")
     return parser.parse_args()
 
 
-# Checks if a target vehicle center coordinate falls within any annotated ignored region bounding box
 def is_inside_ignored_region(box_center_x, box_center_y, ignored_boxes):
-    for left, top, right, bottom in ignored_boxes:
-        if left <= box_center_x <= right and top <= box_center_y <= bottom:
-            return True
-    return False
+    return any(left <= box_center_x <= right and top <= box_center_y <= bottom for left, top, right, bottom in ignored_boxes)
 
 
-# Parses ground truth bounding boxes and vehicle IDs from UA-DETRAC XML sequence file
 def parse_ground_truth_sequence(xml_path):
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-
+    root = ET.parse(xml_path).getroot()
     ignored_boxes = []
     ignored_tag = root.find("ignored_region")
     if ignored_tag is not None:
         for box in ignored_tag.findall("box"):
-            left = float(box.get("left", 0))
-            top = float(box.get("top", 0))
-            w = float(box.get("width", 0))
-            h = float(box.get("height", 0))
-            ignored_boxes.append((left, top, left + w, top + h))
+            l, t = float(box.get("left", 0)), float(box.get("top", 0))
+            ignored_boxes.append((l, t, l + float(box.get("width", 0)), t + float(box.get("height", 0))))
 
     frames_gt = {}
     total_unique_gt_ids = set()
 
     for frame in root.findall("frame"):
-        frame_num = int(frame.get("num", 0))
+        fnum = int(frame.get("num", 0))
         target_list = frame.find("target_list")
         frame_targets = []
 
         if target_list is not None:
             for target in target_list.findall("target"):
-                target_id = int(target.get("id", -1))
                 box = target.find("box")
                 if box is None:
                     continue
-
-                left = float(box.get("left", 0))
-                top = float(box.get("top", 0))
-                w = float(box.get("width", 0))
-                h = float(box.get("height", 0))
-
+                left, top = float(box.get("left", 0)), float(box.get("top", 0))
+                w, h = float(box.get("width", 0)), float(box.get("height", 0))
                 if w <= 1.0 or h <= 1.0:
                     continue
 
-                cx = left + w / 2.0
-                cy = top + h / 2.0
+                cx, cy = left + w / 2.0, top + h / 2.0
                 if is_inside_ignored_region(cx, cy, ignored_boxes):
                     continue
 
                 attr = target.find("attribute")
-                if attr is not None:
-                    truncation = float(attr.get("truncation_ratio", 0.0))
-                    if truncation > 0.85:
-                        continue
+                if attr is not None and float(attr.get("truncation_ratio", 0.0)) > 0.85:
+                    continue
 
-                frame_targets.append({
-                    "id": target_id,
-                    "bbox": [left, top, left + w, top + h],
-                })
+                target_id = int(target.get("id", -1))
+                frame_targets.append({"id": target_id, "bbox": [left, top, left + w, top + h]})
                 total_unique_gt_ids.add(target_id)
 
-        frames_gt[frame_num] = frame_targets
+        frames_gt[fnum] = frame_targets
 
     return frames_gt, len(total_unique_gt_ids)
 
 
-# Calculates pairwise intersection over union between two sets of bounding boxes
 def compute_iou_matrix(boxes1, boxes2):
     if len(boxes1) == 0 or len(boxes2) == 0:
         return np.zeros((len(boxes1), len(boxes2)), dtype=np.float32)
 
-    b1 = np.array(boxes1, dtype=np.float32)
-    b2 = np.array(boxes2, dtype=np.float32)
+    b1 = np.asarray(boxes1, dtype=np.float32)
+    b2 = np.asarray(boxes2, dtype=np.float32)
 
     x1 = np.maximum(b1[:, None, 0], b2[None, :, 0])
     y1 = np.maximum(b1[:, None, 1], b2[None, :, 1])
@@ -169,25 +109,14 @@ def compute_iou_matrix(boxes1, boxes2):
     return np.where(union > 0, intersection / union, 0.0)
 
 
-# Benchmarks vehicle detection and tracking across a single UA-DETRAC sequence
 def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, imgsz, device):
     frames_gt, unique_gt_count = parse_ground_truth_sequence(xml_path)
-    seq_name = xml_path.stem
-
-    total_gt_instances = 0
-    total_pred_instances = 0
-    total_tp = 0
-    total_fp = 0
-    total_fn = 0
-    total_id_switches = 0
-    absolute_count_errors = []
-    squared_count_errors = []
-    latency_records = []
-
+    total_gt_instances, total_pred_instances = 0, 0
+    total_tp, total_fp, total_fn, total_id_switches = 0, 0, 0, 0
+    absolute_count_errors, squared_count_errors, latency_records = [], [], []
     gt_to_track_mapping = {}
-    frame_nums = sorted(frames_gt.keys())
 
-    for fnum in frame_nums:
+    for fnum in sorted(frames_gt.keys()):
         img_path = img_dir / f"img{fnum:05d}.jpg"
         if not img_path.exists():
             continue
@@ -207,24 +136,18 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
             device=device,
             verbose=False,
         )
-        t_end = time.perf_counter()
-        latency_records.append((t_end - t_start) * 1000.0)
+        latency_records.append((time.perf_counter() - t_start) * 1000.0)
 
-        pred_boxes = []
-        pred_ids = []
+        pred_boxes, pred_ids = [], []
         if results[0].boxes is not None and len(results[0].boxes) > 0:
             pred_boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
-            if results[0].boxes.id is not None:
-                pred_ids = results[0].boxes.id.int().cpu().numpy().tolist()
-            else:
-                pred_ids = list(range(len(pred_boxes)))
+            pred_ids = results[0].boxes.id.int().cpu().numpy().tolist() if results[0].boxes.id is not None else list(range(len(pred_boxes)))
 
         gt_targets = frames_gt[fnum]
         gt_boxes = [t["bbox"] for t in gt_targets]
         gt_ids = [t["id"] for t in gt_targets]
 
-        n_gt = len(gt_boxes)
-        n_pred = len(pred_boxes)
+        n_gt, n_pred = len(gt_boxes), len(pred_boxes)
         total_gt_instances += n_gt
         total_pred_instances += n_pred
 
@@ -232,14 +155,11 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
         absolute_count_errors.append(abs_err)
         squared_count_errors.append(abs_err ** 2)
 
-        # Computes bipartite matching to identify True Positives, False Positives, and ID switches
+        # Bipartite matching for TP, FP, FN, and ID switches
         if n_gt > 0 and n_pred > 0:
             iou_matrix = compute_iou_matrix(gt_boxes, pred_boxes)
-            cost_matrix = 1.0 - iou_matrix
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-
-            matched_gt = set()
-            matched_pred = set()
+            row_ind, col_ind = linear_sum_assignment(1.0 - iou_matrix)
+            matched_gt, matched_pred = set(), set()
 
             for r, c in zip(row_ind, col_ind):
                 if iou_matrix[r, c] >= iou_thresh:
@@ -247,16 +167,13 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
                     matched_pred.add(c)
                     total_tp += 1
 
-                    current_gt_id = gt_ids[r]
-                    current_track_id = pred_ids[c]
-
-                    # Checks if this ground truth vehicle switched to a different Track ID
-                    if current_gt_id in gt_to_track_mapping:
-                        if gt_to_track_mapping[current_gt_id] != current_track_id:
+                    gid, tid = gt_ids[r], pred_ids[c]
+                    if gid in gt_to_track_mapping:
+                        if gt_to_track_mapping[gid] != tid:
                             total_id_switches += 1
-                            gt_to_track_mapping[current_gt_id] = current_track_id
+                            gt_to_track_mapping[gid] = tid
                     else:
-                        gt_to_track_mapping[current_gt_id] = current_track_id
+                        gt_to_track_mapping[gid] = tid
 
             total_fp += (n_pred - len(matched_pred))
             total_fn += (n_gt - len(matched_gt))
@@ -277,7 +194,7 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
     fps = 1000.0 / avg_latency if avg_latency > 0 else 0.0
 
     return {
-        "sequence": seq_name,
+        "sequence": xml_path.stem,
         "frames_evaluated": len(absolute_count_errors),
         "total_gt_instances": total_gt_instances,
         "total_pred_instances": total_pred_instances,
@@ -310,8 +227,7 @@ def main():
         sys.exit(1)
 
     data_root = Path(args.data_dir).resolve()
-    xml_dir = data_root / "DETRAC-Test-Annotations-XML"
-    images_root = data_root / "DETRAC-Images"
+    xml_dir, images_root = data_root / "DETRAC-Test-Annotations-XML", data_root / "DETRAC-Images"
 
     if not xml_dir.exists() or not images_root.exists():
         print(f"Error: UA-DETRAC test directories not found under: {data_root}")
@@ -338,7 +254,6 @@ def main():
     print("=" * 85)
 
     model = YOLO(str(weights_path))
-
     sequence_results = []
     pbar = tqdm(xml_files, desc="Benchmarking Sequences")
 
@@ -365,7 +280,6 @@ def main():
         print("Error: No test sequences were evaluated.")
         sys.exit(1)
 
-    # Aggregates metrics across all evaluated sequences
     total_frames = sum(r["frames_evaluated"] for r in sequence_results)
     total_gt = sum(r["total_gt_instances"] for r in sequence_results)
     total_pred = sum(r["total_pred_instances"] for r in sequence_results)
@@ -400,20 +314,17 @@ def main():
         "fps": round(overall_fps, 1),
     }
 
-    # Exports JSON and CSV benchmark logs
     json_path = out_dir / "counting_metrics.json"
     csv_path = out_dir / "per_sequence_summary.csv"
 
     with open(json_path, "w") as f:
         json.dump({"summary": summary_metrics, "sequences": sequence_results}, f, indent=2)
 
-    import csv
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(sequence_results[0].keys()))
         writer.writeheader()
         writer.writerows(sequence_results)
 
-    # Displays formatted benchmark report
     print("\n" + "=" * 85)
     print(" ATCS TRAFFIC COUNTING & TRACKING BENCHMARK REPORT")
     print("=" * 85)

@@ -1,100 +1,39 @@
-import sys
-import time
+"""
+ATCS Vehicle Detector: Benchmarking, Tracking & Inference Utility.
+
+Runs detection or ByteTrack/BoT-SORT tracking on images, image folders, video files, or webcams.
+Provides HUD overlays, latency benchmarks, and annotated output saving.
+"""
+
 import argparse
-from pathlib import Path
 from collections import deque
 from datetime import datetime
+from pathlib import Path
+import sys
+import time
 import cv2
 import numpy as np
 
 
 def parse_args():
-    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
-    parser = argparse.ArgumentParser(
-        description="ATCS Vehicle Detector: Benchmarking, Tracking & Inference Utility."
-    )
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default=str(
-            base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
-        ),
-        help="Path to trained model weights (.pt file).",
-    )
-    parser.add_argument(
-        "--allow-fallback",
-        action="store_true",
-        help="Explicitly permit fallback to pretrained 'yolov8n.pt' if custom weights are missing.",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        required=True,
-        help="Source image file, image directory, video file, or camera index (e.g. '0').",
-    )
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=0.25,
-        help="Detection confidence threshold (0.0 to 1.0, default: 0.25).",
-    )
-    parser.add_argument(
-        "--iou",
-        type=float,
-        default=0.45,
-        help="NMS IoU threshold (0.0 to 1.0, default: 0.45).",
-    )
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=960,
-        help="Inference image resolution (default: 960).",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="",
-        help="Inference device: 'mps' (Apple Silicon), 'cuda:0', 'cpu', or '' (auto-detect).",
-    )
-    parser.add_argument(
-        "--track",
-        action="store_true",
-        help="Enable ByteTrack multi-object tracking to assign persistent vehicle IDs across frames.",
-    )
-    parser.add_argument(
-        "--tracker",
-        type=str,
-        default="bytetrack.yaml",
-        choices=["bytetrack.yaml", "botsort.yaml"],
-        help="Tracker configuration when --track is enabled.",
-    )
-    parser.add_argument(
-        "--vid-stride",
-        type=int,
-        default=1,
-        help="Video frame stride (process every Nth frame, default: 1).",
-    )
-    parser.add_argument(
-        "--save",
-        action="store_true",
-        help="Save annotated results to disk.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=str(base_dir / "runs" / "inference"),
-        help="Directory to save inference results.",
-    )
-    parser.add_argument(
-        "--no-show",
-        action="store_true",
-        help="Do not display visualization window.",
-    )
-    parser.add_argument(
-        "--benchmark",
-        action="store_true",
-        help="Benchmark mode: disables display and file writes to measure pure model throughput and latency.",
-    )
+    base_dir = Path(__file__).resolve().parents[1]
+    default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+
+    parser = argparse.ArgumentParser(description="ATCS Vehicle Detector: Benchmarking, Tracking & Inference Utility.")
+    parser.add_argument("--weights", type=str, default=str(default_weights), help="Path to trained model weights (.pt file).")
+    parser.add_argument("--allow-fallback", action="store_true", help="Permit fallback to 'yolov8n.pt' if custom weights are missing.")
+    parser.add_argument("--source", type=str, required=True, help="Image file, image directory, video file, or camera index (e.g. '0').")
+    parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold (default: 0.25).")
+    parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (default: 0.45).")
+    parser.add_argument("--imgsz", type=int, default=960, help="Inference image resolution (default: 960).")
+    parser.add_argument("--device", type=str, default="", help="Inference device: 'mps', 'cuda:0', 'cpu', or '' (auto).")
+    parser.add_argument("--track", action="store_true", help="Enable multi-object tracking across video frames.")
+    parser.add_argument("--tracker", type=str, default="bytetrack.yaml", choices=["bytetrack.yaml", "botsort.yaml"], help="Tracker configuration.")
+    parser.add_argument("--vid-stride", type=int, default=1, help="Video frame stride (default: 1).")
+    parser.add_argument("--save", action="store_true", help="Save annotated results to disk.")
+    parser.add_argument("--output-dir", type=str, default=str(base_dir / "runs" / "inference"), help="Directory to save inference results.")
+    parser.add_argument("--no-show", action="store_true", help="Do not display visualization window.")
+    parser.add_argument("--benchmark", action="store_true", help="Benchmark mode: disables display and file writes to measure latency.")
     return parser.parse_args()
 
 
@@ -114,9 +53,7 @@ def resolve_weights(weights_arg: str, allow_fallback: bool) -> str:
     if weights_path.is_file():
         return str(weights_path)
 
-    # Check alternative common project paths
-    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
-    alt_p2 = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+    alt_p2 = Path(__file__).resolve().parents[1] / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if alt_p2.is_file():
         print(f"[INFO] Using alternative project weights: {alt_p2}")
         return str(alt_p2)
@@ -134,22 +71,12 @@ def resolve_weights(weights_arg: str, allow_fallback: bool) -> str:
 
 def draw_hud(frame, count, fps=None, infer_ms=None, is_tracking=False):
     h, w = frame.shape[:2]
-    header_h = 55
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, header_h), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 55), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
 
     mode_label = "TRACKED VEHICLES" if is_tracking else "VEHICLES DETECTED"
-    cv2.putText(
-        frame,
-        f"{mode_label}: {count}",
-        (15, 36),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.85,
-        (0, 255, 128),
-        2,
-        cv2.LINE_AA,
-    )
+    cv2.putText(frame, f"{mode_label}: {count}", (15, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 128), 2, cv2.LINE_AA)
 
     stats = []
     if infer_ms is not None:
@@ -160,16 +87,7 @@ def draw_hud(frame, count, fps=None, infer_ms=None, is_tracking=False):
     if stats:
         text = " | ".join(stats)
         text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)[0]
-        cv2.putText(
-            frame,
-            text,
-            (w - text_size[0] - 15, 36),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
-            (0, 200, 255),
-            2,
-            cv2.LINE_AA,
-        )
+        cv2.putText(frame, text, (w - text_size[0] - 15, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 200, 255), 2, cv2.LINE_AA)
 
 
 def process_image(model, img_path: Path, args, out_dir: Path):
@@ -188,9 +106,7 @@ def process_image(model, img_path: Path, args, out_dir: Path):
         verbose=False,
     )
     t_infer = (time.perf_counter() - t0) * 1000.0
-
-    boxes = results[0].boxes
-    vehicle_count = len(boxes)
+    vehicle_count = len(results[0].boxes)
     print(f"[{img_path.name}] Found {vehicle_count} vehicles | Latency: {t_infer:.1f} ms")
 
     if args.benchmark:
@@ -203,8 +119,7 @@ def process_image(model, img_path: Path, args, out_dir: Path):
         out_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_file = out_dir / f"pred_{img_path.stem}_{timestamp}{img_path.suffix}"
-        success = cv2.imwrite(str(out_file), annotated_frame)
-        if success:
+        if cv2.imwrite(str(out_file), annotated_frame):
             print(f"[SAVED] {out_file}")
         else:
             print(f"[ERROR] Failed to write image to: {out_file}")
@@ -216,13 +131,8 @@ def process_image(model, img_path: Path, args, out_dir: Path):
 
 
 def process_stream_or_video(model, source_str: str, args, out_dir: Path):
-    # Parse source: integer if camera index, else path string
-    if source_str.isdigit():
-        src_input = int(source_str)
-        is_live = True
-    else:
-        src_input = source_str
-        is_live = False
+    is_live = source_str.isdigit()
+    src_input = int(source_str) if is_live else source_str
 
     cap = cv2.VideoCapture(src_input)
     if not cap.isOpened():
@@ -232,14 +142,10 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps_in = cap.get(cv2.CAP_PROP_FPS)
-
-    # Sanity check video capture FPS
     if fps_in <= 0.0 or np.isnan(fps_in) or fps_in > 120.0:
-        fallback_fps = 25.0
-        print(f"[WARNING] Invalid input FPS reported ({fps_in}). Defaulting to {fallback_fps:.1f} FPS.")
-        fps_in = fallback_fps
+        fps_in = 25.0
+        print(f"[WARNING] Invalid input FPS reported ({fps_in}). Defaulting to 25.0 FPS.")
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if not is_live else 0
     print(f"[STREAM] Source: {source_str} ({width}x{height} @ {fps_in:.1f} FPS, Stride: {args.vid_stride})")
 
     video_writer = None
@@ -251,21 +157,16 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         effective_fps = max(1.0, fps_in / args.vid_stride)
         video_writer = cv2.VideoWriter(str(out_file), fourcc, effective_fps, (width, height))
-
         if not video_writer.isOpened():
             print(f"[ERROR] Failed to initialize VideoWriter for: {out_file}")
             video_writer = None
         else:
             print(f"[SAVED] Recording annotated video to: {out_file}")
 
-    # Latency and FPS metrics
-    rolling_window_size = 30
-    frame_latencies = deque(maxlen=rolling_window_size)
-    infer_latencies = deque(maxlen=rolling_window_size)
+    frame_latencies = deque(maxlen=30)
+    infer_latencies = deque(maxlen=30)
     all_infer_times = []
-
-    frame_count = 0
-    processed_count = 0
+    frame_count, processed_count = 0, 0
     prev_loop_time = time.perf_counter()
 
     try:
@@ -282,7 +183,6 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
             t_infer_start = time.perf_counter()
 
             if args.track:
-                # Persistent ByteTrack tracking
                 results = model.track(
                     source=frame,
                     conf=args.conf,
@@ -303,38 +203,27 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
                     verbose=False,
                 )
 
-            t_infer_end = time.perf_counter()
-            infer_ms = (t_infer_end - t_infer_start) * 1000.0
+            infer_ms = (time.perf_counter() - t_infer_start) * 1000.0
             infer_latencies.append(infer_ms)
             all_infer_times.append(infer_ms)
 
-            # Measure overall loop FPS
             curr_loop_time = time.perf_counter()
             dt_loop = curr_loop_time - prev_loop_time
             prev_loop_time = curr_loop_time
             if dt_loop > 0:
                 frame_latencies.append(1.0 / dt_loop)
+
             rolling_fps = float(np.mean(frame_latencies)) if frame_latencies else 0.0
             mean_infer_ms = float(np.mean(infer_latencies)) if infer_latencies else infer_ms
-
-            boxes = results[0].boxes
-            vehicle_count = len(boxes)
+            vehicle_count = len(results[0].boxes)
 
             if args.benchmark:
                 if processed_count % 30 == 0:
-                    print(
-                        f"Frame {processed_count:04d} | Infer: {mean_infer_ms:.1f} ms | Rolling FPS: {rolling_fps:.1f} | Detections: {vehicle_count}"
-                    )
+                    print(f"Frame {processed_count:04d} | Infer: {mean_infer_ms:.1f} ms | Rolling FPS: {rolling_fps:.1f} | Detections: {vehicle_count}")
                 continue
 
             annotated_frame = results[0].plot(line_width=2)
-            draw_hud(
-                annotated_frame,
-                vehicle_count,
-                fps=rolling_fps,
-                infer_ms=mean_infer_ms,
-                is_tracking=args.track,
-            )
+            draw_hud(annotated_frame, vehicle_count, fps=rolling_fps, infer_ms=mean_infer_ms, is_tracking=args.track)
 
             if video_writer is not None:
                 video_writer.write(annotated_frame)
@@ -352,7 +241,6 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
         if not args.no_show and not args.benchmark:
             cv2.destroyAllWindows()
 
-    # Print summary statistics
     if all_infer_times:
         p50 = np.percentile(all_infer_times, 50)
         p95 = np.percentile(all_infer_times, 95)
@@ -399,7 +287,6 @@ def main():
     out_dir = Path(args.output_dir)
     src_path = Path(args.source)
 
-    # 1. Image directory handling
     if src_path.is_dir():
         image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         image_files = sorted([p for p in src_path.iterdir() if p.suffix.lower() in image_extensions])
@@ -410,11 +297,9 @@ def main():
         for img_p in image_files:
             process_image(model, img_p, args, out_dir)
 
-    # 2. Single static image handling
     elif src_path.is_file() and src_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
         process_image(model, src_path, args, out_dir)
 
-    # 3. Video file or live stream handling
     else:
         process_stream_or_video(model, args.source, args, out_dir)
 
