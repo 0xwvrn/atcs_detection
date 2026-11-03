@@ -21,12 +21,13 @@ from ultralytics import YOLO
 
 
 def parse_args():
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
     default_weights = (
-        Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+        base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     )
     if not default_weights.exists():
         default_weights = (
-            Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+            base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
         )
     if not default_weights.exists():
         default_weights = "yolov8n.pt"
@@ -525,33 +526,29 @@ class NonBlockingTelemetryBridge:
         pcu_upstream = smoothed_q["PCU_upstream"]
         d_tail_m = smoothed_q["D_tail_m"]
 
+        # Standardized compact ATCS telemetry schema for ESP32-S3 UART link (< 100 bytes)
+        is_packet_valid = bool(frame_valid and estimate_valid and is_calibrated)
         telemetry = {
+            "approach": self.approach_leg,
+            "Q": int(q_stopline),
+            "PCU": round(float(pcu_stopline), 2),
+            "D_tail_m": round(float(d_tail_m), 2),
+            "valid": is_packet_valid,
+        }
+
+        # Full diagnostic record preserved for host logging / UI
+        self.last_diagnostic_record = {
             "seq": self.seq,
             "approach": self.approach_leg,
-            # Control gate: valid requires both successful estimation and verified metric calibration
-            "valid": bool(frame_valid and estimate_valid and is_calibrated),
-            "frame_valid": frame_valid,
-            "estimate_valid": estimate_valid,
-            "calibrated": is_calibrated,
-            # Core demand for signal scheduling (strictly stopline-connected)
-            "Q": q_stopline,
-            "PCU": pcu_stopline,
-            "D_tail_m": d_tail_m,
-            # Explicit academic telemetry breakdown
+            "valid": is_packet_valid,
             "Q_stopline": q_stopline,
             "Q_upstream": q_upstream,
             "Q_stopped_total": q_stopline + q_upstream,
             "PCU_stopline": pcu_stopline,
             "PCU_upstream": pcu_upstream,
             "PCU_total": round(pcu_stopline + pcu_upstream, 2),
-            "lanes_stopline": {
-                f"lane_{lid}": lq.count for lid, lq in lane_queues.items() if lq.connected_to_stopline
-            },
-            "lanes_upstream": {
-                f"lane_{lid}": lq.count for lid, lq in lane_queues.items() if not lq.connected_to_stopline
-            },
+            "D_tail_m": d_tail_m,
             "timestamp_ms": frame_wall_ms,
-            "source_timestamp_ms": source_timestamp_ms,
             "age_ms": measurement_age_ms,
         }
 

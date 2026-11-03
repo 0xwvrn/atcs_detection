@@ -4,11 +4,12 @@ from pathlib import Path
 
 
 def parse_args():
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Export trained YOLO PyTorch weights to edge-optimized TFLite format.")
     parser.add_argument(
         "--weights",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"),
+        default=str(base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"),
         help="Path to trained model checkpoint (.pt).",
     )
     parser.add_argument(
@@ -31,7 +32,7 @@ def parse_args():
     parser.add_argument(
         "--data",
         type=str,
-        default=str(Path(__file__).resolve().parent / "configs" / "data_combined.yaml"),
+        default=str(base_dir / "configs" / "data_combined.yaml"),
         help="Dataset YAML file for INT8 calibration representative dataset.",
     )
     return parser.parse_args()

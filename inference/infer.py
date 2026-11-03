@@ -9,6 +9,7 @@ import numpy as np
 
 
 def parse_args():
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description="ATCS Vehicle Detector: Benchmarking, Tracking & Inference Utility."
     )
@@ -16,7 +17,7 @@ def parse_args():
         "--weights",
         type=str,
         default=str(
-            Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+            base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
         ),
         help="Path to trained model weights (.pt file).",
     )
@@ -81,7 +82,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "inference"),
+        default=str(base_dir / "runs" / "inference"),
         help="Directory to save inference results.",
     )
     parser.add_argument(
@@ -114,7 +115,8 @@ def resolve_weights(weights_arg: str, allow_fallback: bool) -> str:
         return str(weights_path)
 
     # Check alternative common project paths
-    alt_p2 = Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    alt_p2 = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if alt_p2.is_file():
         print(f"[INFO] Using alternative project weights: {alt_p2}")
         return str(alt_p2)

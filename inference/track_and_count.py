@@ -8,9 +8,10 @@ import numpy as np
 
 
 def parse_args():
-    default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    default_weights = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if not default_weights.exists():
-        default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+        default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
     if not default_weights.exists():
         default_weights = "yolov8n.pt"
 
@@ -61,7 +62,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "tracking"),
+        default=str(base_dir / "runs" / "tracking"),
         help="Directory to save tracking output videos.",
     )
     parser.add_argument(

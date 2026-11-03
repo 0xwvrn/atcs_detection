@@ -15,9 +15,10 @@ def detect_device():
 
 
 def parse_args():
-    default_data = Path(__file__).resolve().parent / "configs" / "data_combined.yaml"
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    default_data = base_dir / "configs" / "data_combined.yaml"
     if not default_data.exists():
-        default_data = Path(__file__).resolve().parent / "configs" / "data.yaml"
+        default_data = base_dir / "configs" / "data.yaml"
 
     parser = argparse.ArgumentParser(description="Train High-Recall ATCS Vehicle Detector (Memory Safe).")
     parser.add_argument(
@@ -125,7 +126,7 @@ def parse_args():
     parser.add_argument(
         "--project",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "detect"),
+        default=str(base_dir / "runs" / "detect"),
         help="Project directory to save training runs.",
     )
     parser.add_argument(

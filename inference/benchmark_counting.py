@@ -12,13 +12,14 @@ from scipy.optimize import linear_sum_assignment
 
 
 def parse_args():
-    default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    default_weights = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if not default_weights.exists():
-        default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+        default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
     if not default_weights.exists():
         default_weights = "yolov8n.pt"
 
-    default_data_dir = Path(__file__).resolve().parent.parent / "data" / "DETRAC"
+    default_data_dir = base_dir.parent / "data" / "DETRAC"
 
     parser = argparse.ArgumentParser(description="ATCS Traffic Counting & Multi-Object Tracking Benchmark Suite.")
     parser.add_argument(
@@ -73,7 +74,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "benchmark"),
+        default=str(base_dir / "runs" / "benchmark"),
         help="Directory to save benchmark metrics and summary tables.",
     )
     return parser.parse_args()

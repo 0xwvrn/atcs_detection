@@ -5,11 +5,12 @@ import numpy as np
 
 
 def parse_args():
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="ATCS Dataset Annotation Verification Tool.")
     parser.add_argument(
         "--dataset-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "dataset"),
+        default=str(base_dir / "dataset"),
         help="Path to dataset directory containing images and labels.",
     )
     parser.add_argument(
@@ -28,7 +29,7 @@ def parse_args():
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=str(Path(__file__).resolve().parent / "runs" / "sanity_check"),
+        default=str(base_dir / "runs" / "sanity_check"),
         help="Directory to save verification visualization images.",
     )
     return parser.parse_args()

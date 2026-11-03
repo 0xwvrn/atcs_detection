@@ -14,15 +14,16 @@ def detect_device():
 
 
 def parse_args():
-    default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    default_weights = base_dir / "runs" / "detect" / "model_p2_960_safe" / "weights" / "best.pt"
     if not default_weights.exists():
-        default_weights = Path(__file__).resolve().parent / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
+        default_weights = base_dir / "runs" / "detect" / "atcs_high_recall_model" / "weights" / "best.pt"
     if not default_weights.exists():
         default_weights = "yolov8n.pt"
 
-    default_data = Path(__file__).resolve().parent / "configs" / "data_combined.yaml"
+    default_data = base_dir / "configs" / "data_combined.yaml"
     if not default_data.exists():
-        default_data = Path(__file__).resolve().parent / "configs" / "data.yaml"
+        default_data = base_dir / "configs" / "data.yaml"
 
     parser = argparse.ArgumentParser(description="Evaluate ATCS Vehicle Detection Model on Validation Dataset.")
     parser.add_argument(
