@@ -1,4 +1,4 @@
-path: /Users/dhritiman/Documents/dev/atcs/model_training/dataset
+path: /Users/dhritiman/Documents/dev/atcs/vision/dataset
 train: images/train_visdrone
 val: images/val_visdrone
 names:
