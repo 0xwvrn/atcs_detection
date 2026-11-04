@@ -1,7 +1,7 @@
 """
-ATCS Multi-Object Tracking & Vehicle Queue / Throughput Counting.
+ATCS Multi-Object Tracking & Vehicle Throughput Counting.
 
-Performs persistent ByteTrack/BoT-SORT tracking, stop-line crossing throughput counting,
+Performs persistent ByteTrack/BoT-SORT tracking, configurable stop-line crossing throughput counting,
 and active track counting on videos, webcams, or image directories.
 """
 
@@ -24,10 +24,12 @@ def parse_args():
         "yolov8n.pt",
     )
 
-    parser = argparse.ArgumentParser(description="ATCS Multi-Object Tracking & Vehicle Queue / Throughput Counting.")
+    parser = argparse.ArgumentParser(description="ATCS Multi-Object Tracking & Vehicle Throughput Counting.")
     parser.add_argument("--weights", type=str, default=str(default_weights), help="Path to trained model weights (.pt or .tflite).")
+    parser.add_argument("--allow-fallback", action="store_true", help="Explicitly permit fallback to 'yolov8n.pt' if custom weights are missing.")
     parser.add_argument("--source", type=str, required=True, help="Video file, image folder, RTSP stream URL, or webcam index.")
     parser.add_argument("--tracker", type=str, default="bytetrack.yaml", choices=["bytetrack.yaml", "botsort.yaml"], help="Tracking config.")
+    parser.add_argument("--direction", type=str, default="down", choices=["down", "up", "both"], help="Crossing direction: 'down' (top-to-bottom, default), 'up', or 'both'.")
     parser.add_argument("--conf", type=float, default=0.35, help="Detection confidence threshold (default: 0.35).")
     parser.add_argument("--iou", type=float, default=0.45, help="NMS IoU threshold (default: 0.45).")
     parser.add_argument("--imgsz", nargs="+", type=int, default=[960], help="Inference image resolution (default: 960).")
@@ -39,12 +41,13 @@ def parse_args():
 
 
 class VehicleTrafficTracker:
-    """Manages multi-object trajectory association, virtual line crossing, and queue occupancy counting."""
+    """Manages multi-object trajectory association, virtual line crossing, and active track counting."""
 
-    def __init__(self, line_y_ratio=0.65, history_len=30):
+    def __init__(self, line_y_ratio=0.65, history_len=30, direction="down"):
         self.track_history = defaultdict(lambda: deque(maxlen=history_len))
         self.counted_ids = set()
         self.line_y_ratio = line_y_ratio
+        self.direction = direction
         self.total_throughput_count = 0
 
     def process_tracks(self, frame, boxes, track_ids):
@@ -65,10 +68,18 @@ class VehicleTrafficTracker:
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 self.track_history[tid].append((cx, cy))
 
-                # Directional top-to-bottom stopline crossing detection
+                # Directional stopline crossing detection
                 if len(self.track_history[tid]) >= 2:
                     prev_y = self.track_history[tid][-2][1]
-                    if prev_y < line_y <= cy and tid not in self.counted_ids:
+                    crossed = False
+                    if self.direction == "down" and prev_y < line_y <= cy:
+                        crossed = True
+                    elif self.direction == "up" and prev_y > line_y >= cy:
+                        crossed = True
+                    elif self.direction == "both" and ((prev_y < line_y <= cy) or (prev_y > line_y >= cy)):
+                        crossed = True
+
+                    if crossed and tid not in self.counted_ids:
                         self.counted_ids.add(tid)
                         self.total_throughput_count += 1
 
@@ -82,13 +93,13 @@ class VehicleTrafficTracker:
         return len(current_frame_ids), self.total_throughput_count
 
 
-def draw_tracking_hud(frame, queue_count, throughput_count, fps):
+def draw_tracking_hud(frame, active_track_count, throughput_count, fps):
     h, w = frame.shape[:2]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, 65), (15, 15, 15), -1)
     cv2.addWeighted(overlay, 0.8, frame, 0.2, 0, frame)
 
-    cv2.putText(frame, f"ACTIVE QUEUE: {queue_count}", (15, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 128), 2, cv2.LINE_AA)
+    cv2.putText(frame, f"ACTIVE TRACKS: {active_track_count}", (15, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 128), 2, cv2.LINE_AA)
     cv2.putText(frame, f"TOTAL PASSED: {throughput_count}", (w // 2 - 80, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 200, 255), 2, cv2.LINE_AA)
     cv2.putText(frame, f"FPS: {fps:.1f}", (w - 140, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 200, 200), 2, cv2.LINE_AA)
 
@@ -169,8 +180,13 @@ def main():
 
     weights_path = Path(args.weights).resolve()
     if not weights_path.exists():
-        print(f"Warning: Specified weights '{weights_path}' not found, falling back to 'yolov8n.pt'.")
-        weights_path = "yolov8n.pt"
+        if args.allow_fallback:
+            print(f"[WARNING] Specified weights '{weights_path}' not found. Falling back to 'yolov8n.pt' (--allow-fallback specified).")
+            weights_path = Path("yolov8n.pt")
+        else:
+            print(f"[ERROR] Specified weights '{weights_path}' not found.")
+            print("Fallback to generic pretrained weights requires explicit '--allow-fallback'.")
+            sys.exit(1)
 
     img_size = args.imgsz if len(args.imgsz) > 1 else args.imgsz[0]
 
@@ -179,13 +195,14 @@ def main():
     print("=" * 70)
     print(f" Model Weights:     {weights_path}")
     print(f" Tracker Config:    {args.tracker}")
+    print(f" Crossing Direction:{args.direction}")
     print(f" Video Source:      {args.source}")
     print(f" Confidence / IoU:  {args.conf} / {args.iou}")
     print(f" Image Resolution:  {img_size}")
     print("=" * 70)
 
     model = YOLO(str(weights_path))
-    tracker_manager = VehicleTrafficTracker()
+    tracker_manager = VehicleTrafficTracker(direction=args.direction)
 
     frame_gen, width, height, fps_in, src_label = get_frame_generator(args.source)
     if frame_gen is None:
@@ -202,7 +219,11 @@ def main():
         out_file = out_dir / f"tracking_{src_stem}.mp4"
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         video_writer = cv2.VideoWriter(str(out_file), fourcc, fps_in, (width, height))
-        print(f"Saving tracking video stream to: {out_file}")
+        if not video_writer.isOpened():
+            print(f"[ERROR] Failed to initialize VideoWriter for: {out_file}")
+            video_writer = None
+        else:
+            print(f"[SAVED] Recording tracking video stream to: {out_file}")
 
     prev_time = time.time()
     frame_idx = 0
@@ -227,8 +248,8 @@ def main():
             boxes = results[0].boxes.xyxy.cpu().numpy() if results[0].boxes is not None else []
             track_ids = results[0].boxes.id.int().cpu().numpy() if results[0].boxes is not None and results[0].boxes.id is not None else None
 
-            queue_cnt, throughput_cnt = tracker_manager.process_tracks(frame, boxes, track_ids)
-            draw_tracking_hud(frame, queue_cnt, throughput_cnt, fps_calc)
+            active_cnt, throughput_cnt = tracker_manager.process_tracks(frame, boxes, track_ids)
+            draw_tracking_hud(frame, active_cnt, throughput_cnt, fps_calc)
 
             if video_writer is not None:
                 video_writer.write(frame)
@@ -236,7 +257,8 @@ def main():
             if not args.no_show:
                 cv2.imshow("ATCS Multi-Object Tracking & Vehicle Counting", frame)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 27 or key == ord("q"):
+                if key in (27, ord("q")):
+                    print("[INFO] Terminated by user.")
                     break
 
             frame_idx += 1

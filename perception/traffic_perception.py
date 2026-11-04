@@ -14,7 +14,6 @@ from typing import Dict, Tuple
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
 
 try:
     from .telemetry import NonBlockingTelemetryBridge
@@ -120,6 +119,12 @@ def run_perception(args):
     print(f"  Tx Rate:    {args.telemetry_rate} Hz | Port: {args.serial_port}")
     print("==================================================")
 
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        print("[ERROR] Ultralytics is not installed. Please activate your virtual environment: source venv/bin/activate")
+        sys.exit(1)
+
     model = YOLO(args.weights)
     names_list = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
     is_multiclass = len(names_list) > 1 and not (len(names_list) == 1 and names_list[0] == "vehicle")
@@ -158,12 +163,9 @@ def run_perception(args):
         frame_idx, last_tx_time = 0, 0.0
         tx_interval = 1.0 / max(0.1, args.telemetry_rate)
 
+        curr_frame = sample_frame
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[INFO] Video feed ended or completed.")
-                break
-
+            frame = curr_frame
             frame_idx += 1
             if is_live_stream:
                 t_src = time.time()
@@ -261,6 +263,11 @@ def run_perception(args):
                 cv2.imshow("ATCS Traffic Perception", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
+
+            ret, curr_frame = cap.read()
+            if not ret:
+                print("[INFO] Video feed ended or completed.")
+                break
 
     except KeyboardInterrupt:
         print("\n[INFO] Stopped by user.")

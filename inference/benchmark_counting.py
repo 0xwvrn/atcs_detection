@@ -41,6 +41,13 @@ def parse_args():
     return parser.parse_args()
 
 
+def reset_tracker_state(model):
+    """Resets tracker state inside Ultralytics predictor to isolate benchmark sequences."""
+    if hasattr(model, "predictor") and model.predictor is not None:
+        if hasattr(model.predictor, "trackers"):
+            model.predictor.trackers = []
+
+
 def is_inside_ignored_region(box_center_x, box_center_y, ignored_boxes):
     return any(left <= box_center_x <= right and top <= box_center_y <= bottom for left, top, right, bottom in ignored_boxes)
 
@@ -113,6 +120,7 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
     frames_gt, unique_gt_count = parse_ground_truth_sequence(xml_path)
     total_gt_instances, total_pred_instances = 0, 0
     total_tp, total_fp, total_fn, total_id_switches = 0, 0, 0, 0
+    has_any_tracker_ids = False
     absolute_count_errors, squared_count_errors, latency_records = [], [], []
     gt_to_track_mapping = {}
 
@@ -138,10 +146,12 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
         )
         latency_records.append((time.perf_counter() - t_start) * 1000.0)
 
-        pred_boxes, pred_ids = [], []
+        pred_boxes, pred_ids = [], None
         if results[0].boxes is not None and len(results[0].boxes) > 0:
             pred_boxes = results[0].boxes.xyxy.cpu().numpy().tolist()
-            pred_ids = results[0].boxes.id.int().cpu().numpy().tolist() if results[0].boxes.id is not None else list(range(len(pred_boxes)))
+            if results[0].boxes.id is not None:
+                pred_ids = results[0].boxes.id.int().cpu().numpy().tolist()
+                has_any_tracker_ids = True
 
         gt_targets = frames_gt[fnum]
         gt_boxes = [t["bbox"] for t in gt_targets]
@@ -167,13 +177,14 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
                     matched_pred.add(c)
                     total_tp += 1
 
-                    gid, tid = gt_ids[r], pred_ids[c]
-                    if gid in gt_to_track_mapping:
-                        if gt_to_track_mapping[gid] != tid:
-                            total_id_switches += 1
+                    if pred_ids is not None and c < len(pred_ids):
+                        gid, tid = gt_ids[r], pred_ids[c]
+                        if gid in gt_to_track_mapping:
+                            if gt_to_track_mapping[gid] != tid:
+                                total_id_switches += 1
+                                gt_to_track_mapping[gid] = tid
+                        else:
                             gt_to_track_mapping[gid] = tid
-                    else:
-                        gt_to_track_mapping[gid] = tid
 
             total_fp += (n_pred - len(matched_pred))
             total_fn += (n_gt - len(matched_gt))
@@ -184,12 +195,14 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
     mae = float(np.mean(absolute_count_errors)) if absolute_count_errors else 0.0
     rmse = float(np.sqrt(np.mean(squared_count_errors))) if squared_count_errors else 0.0
     sum_abs_err = float(np.sum(absolute_count_errors)) if absolute_count_errors else 0.0
+    sum_sq_err = float(np.sum(squared_count_errors)) if squared_count_errors else 0.0
 
     counting_accuracy = max(0.0, (1.0 - sum_abs_err / max(1, total_gt_instances))) * 100.0
     counting_error = 100.0 - counting_accuracy
     false_count_rate = (total_fp / max(1, total_pred_instances)) * 100.0
     missed_vehicle_rate = (total_fn / max(1, total_gt_instances)) * 100.0
-    duplicate_count_rate = (total_id_switches / max(1, unique_gt_count)) * 100.0
+    duplicate_count_rate = ((total_id_switches / max(1, unique_gt_count)) * 100.0) if has_any_tracker_ids else None
+    id_switches_val = total_id_switches if has_any_tracker_ids else None
     avg_latency = float(np.mean(latency_records)) if latency_records else 0.0
     fps = 1000.0 / avg_latency if avg_latency > 0 else 0.0
 
@@ -198,6 +211,11 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
         "frames_evaluated": len(absolute_count_errors),
         "total_gt_instances": total_gt_instances,
         "total_pred_instances": total_pred_instances,
+        "total_tp": total_tp,
+        "total_fp": total_fp,
+        "total_fn": total_fn,
+        "sum_abs_err": sum_abs_err,
+        "sum_sq_err": sum_sq_err,
         "unique_gt_vehicles": unique_gt_count,
         "counting_accuracy_pct": round(counting_accuracy, 2),
         "counting_error_pct": round(counting_error, 2),
@@ -205,8 +223,9 @@ def evaluate_sequence(model, tracker_cfg, xml_path, img_dir, conf, iou_thresh, i
         "rmse_per_frame": round(rmse, 3),
         "false_count_rate_pct": round(false_count_rate, 2),
         "missed_vehicle_rate_pct": round(missed_vehicle_rate, 2),
-        "duplicate_count_rate_pct": round(duplicate_count_rate, 2),
-        "id_switches": total_id_switches,
+        "duplicate_count_rate_pct": round(duplicate_count_rate, 2) if duplicate_count_rate is not None else None,
+        "id_switches": id_switches_val,
+        "tracking_available": has_any_tracker_ids,
         "avg_latency_ms": round(avg_latency, 2),
         "fps": round(fps, 1),
     }
@@ -264,6 +283,7 @@ def main():
             continue
 
         pbar.set_postfix({"seq": seq_name})
+        reset_tracker_state(model)
         res = evaluate_sequence(
             model=model,
             tracker_cfg=args.tracker,
@@ -283,18 +303,32 @@ def main():
     total_frames = sum(r["frames_evaluated"] for r in sequence_results)
     total_gt = sum(r["total_gt_instances"] for r in sequence_results)
     total_pred = sum(r["total_pred_instances"] for r in sequence_results)
-    total_id_switches = sum(r["id_switches"] for r in sequence_results)
+    total_tp = sum(r["total_tp"] for r in sequence_results)
+    total_fp = sum(r["total_fp"] for r in sequence_results)
+    total_fn = sum(r["total_fn"] for r in sequence_results)
+    total_abs_err = sum(r["sum_abs_err"] for r in sequence_results)
+    total_sq_err = sum(r["sum_sq_err"] for r in sequence_results)
     total_unique_gt = sum(r["unique_gt_vehicles"] for r in sequence_results)
 
-    avg_counting_acc = float(np.mean([r["counting_accuracy_pct"] for r in sequence_results]))
-    avg_counting_err = float(np.mean([r["counting_error_pct"] for r in sequence_results]))
-    avg_mae = float(np.mean([r["mae_per_frame"] for r in sequence_results]))
-    avg_rmse = float(np.mean([r["rmse_per_frame"] for r in sequence_results]))
-    avg_false_count_rate = float(np.mean([r["false_count_rate_pct"] for r in sequence_results]))
-    avg_missed_rate = float(np.mean([r["missed_vehicle_rate_pct"] for r in sequence_results]))
-    avg_dup_rate = (total_id_switches / max(1, total_unique_gt)) * 100.0
+    valid_id_switches = [r["id_switches"] for r in sequence_results if r["id_switches"] is not None]
+    total_id_switches = sum(valid_id_switches) if valid_id_switches else None
+
+    # Dataset-level micro-aggregated metrics
+    dataset_count_acc = max(0.0, (1.0 - total_abs_err / max(1, total_gt))) * 100.0
+    dataset_count_err = (total_abs_err / max(1, total_gt)) * 100.0
+    dataset_mae = total_abs_err / max(1, total_frames)
+    dataset_rmse = float(np.sqrt(total_sq_err / max(1, total_frames)))
+    dataset_false_count_rate = (total_fp / max(1, total_pred)) * 100.0
+    dataset_missed_rate = (total_fn / max(1, total_gt)) * 100.0
+    dataset_dup_rate = ((total_id_switches / max(1, total_unique_gt)) * 100.0) if total_id_switches is not None else None
     overall_latency = float(np.mean([r["avg_latency_ms"] for r in sequence_results]))
     overall_fps = 1000.0 / overall_latency if overall_latency > 0 else 0.0
+
+    # Macro-averaged metrics across sequences
+    macro_count_acc = float(np.mean([r["counting_accuracy_pct"] for r in sequence_results]))
+    macro_count_err = float(np.mean([r["counting_error_pct"] for r in sequence_results]))
+    macro_mae = float(np.mean([r["mae_per_frame"] for r in sequence_results]))
+    macro_rmse = float(np.mean([r["rmse_per_frame"] for r in sequence_results]))
 
     summary_metrics = {
         "model": str(weights_path.name),
@@ -302,14 +336,18 @@ def main():
         "total_frames_evaluated": total_frames,
         "total_ground_truth_vehicles": total_gt,
         "total_predicted_vehicles": total_pred,
-        "counting_accuracy_pct": round(avg_counting_acc, 2),
-        "counting_error_pct": round(avg_counting_err, 2),
-        "mae_vehicle_count": round(avg_mae, 3),
-        "rmse_vehicle_count": round(avg_rmse, 3),
-        "false_count_rate_pct": round(avg_false_count_rate, 2),
-        "missed_vehicle_rate_pct": round(avg_missed_rate, 2),
-        "duplicate_count_rate_pct": round(avg_dup_rate, 2),
-        "id_switches": total_id_switches,
+        "dataset_count_agreement_pct": round(dataset_count_acc, 2),
+        "dataset_count_error_pct": round(dataset_count_err, 2),
+        "dataset_mae_vehicle_count": round(dataset_mae, 3),
+        "dataset_rmse_vehicle_count": round(dataset_rmse, 3),
+        "dataset_false_count_rate_pct": round(dataset_false_count_rate, 2),
+        "dataset_missed_vehicle_rate_pct": round(dataset_missed_rate, 2),
+        "dataset_duplicate_count_rate_pct": round(dataset_dup_rate, 2) if dataset_dup_rate is not None else None,
+        "total_id_switches": total_id_switches,
+        "macro_count_agreement_pct": round(macro_count_acc, 2),
+        "macro_count_error_pct": round(macro_count_err, 2),
+        "macro_mae_vehicle_count": round(macro_mae, 3),
+        "macro_rmse_vehicle_count": round(macro_rmse, 3),
         "average_latency_ms": round(overall_latency, 2),
         "fps": round(overall_fps, 1),
     }
@@ -332,14 +370,16 @@ def main():
     print(f" Total Ground Truth Count:   {total_gt:,} vehicle instances")
     print(f" Total Predicted Count:      {total_pred:,} vehicle instances")
     print("-" * 85)
-    print(f" Counting Accuracy:        {summary_metrics['counting_accuracy_pct']}%")
-    print(f" Counting Error (MAPE):    {summary_metrics['counting_error_pct']}%")
-    print(f" MAE (Vehicle Count):      {summary_metrics['mae_vehicle_count']} vehicles / frame")
-    print(f" RMSE (Vehicle Count):     {summary_metrics['rmse_vehicle_count']} vehicles / frame")
-    print(f" False Count Rate:         {summary_metrics['false_count_rate_pct']}%  (Ghost detections)")
-    print(f" Missed Vehicle Rate:       {summary_metrics['missed_vehicle_rate_pct']}%  (Omissions)")
-    print(f" Duplicate Count Rate:      {summary_metrics['duplicate_count_rate_pct']}%  (ID switches: {total_id_switches})")
-    print(f" Per-Frame Latency:        {summary_metrics['average_latency_ms']} ms  ({summary_metrics['fps']} FPS)")
+    print(f" Normalized Count Agreement: {summary_metrics['dataset_count_agreement_pct']}%  (Dataset micro-aggregate)")
+    print(f" Normalized Count Error:     {summary_metrics['dataset_count_error_pct']}%  (sum(|pred-gt|) / sum(gt))")
+    print(f" Macro Count Agreement:      {summary_metrics['macro_count_agreement_pct']}%  (Sequence unweighted mean)")
+    print(f" Dataset MAE:                {summary_metrics['dataset_mae_vehicle_count']} vehicles / frame")
+    print(f" Dataset RMSE:               {summary_metrics['dataset_rmse_vehicle_count']} vehicles / frame")
+    print(f" False Count Rate:           {summary_metrics['dataset_false_count_rate_pct']}%  (Ghost detections)")
+    print(f" Missed Vehicle Rate:        {summary_metrics['dataset_missed_vehicle_rate_pct']}%  (Omissions)")
+    id_sw_str = f"{summary_metrics['dataset_duplicate_count_rate_pct']}%  (ID switches: {total_id_switches})" if total_id_switches is not None else "N/A (Tracking IDs unavailable)"
+    print(f" Duplicate Count Rate:       {id_sw_str}")
+    print(f" Per-Frame Latency:          {summary_metrics['average_latency_ms']} ms  ({summary_metrics['fps']} FPS)")
     print("=" * 85)
     print(f" Benchmark JSON: {json_path}")
     print(f" Sequence CSV:   {csv_path}")

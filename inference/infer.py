@@ -141,10 +141,12 @@ def process_stream_or_video(model, source_str: str, args, out_dir: Path):
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps_in = cap.get(cv2.CAP_PROP_FPS)
-    if fps_in <= 0.0 or np.isnan(fps_in) or fps_in > 120.0:
+    raw_fps = cap.get(cv2.CAP_PROP_FPS)
+    if raw_fps <= 0.0 or np.isnan(raw_fps) or raw_fps > 120.0:
+        print(f"[WARNING] Invalid input FPS reported ({raw_fps}). Defaulting to 25.0 FPS.")
         fps_in = 25.0
-        print(f"[WARNING] Invalid input FPS reported ({fps_in}). Defaulting to 25.0 FPS.")
+    else:
+        fps_in = raw_fps
 
     print(f"[STREAM] Source: {source_str} ({width}x{height} @ {fps_in:.1f} FPS, Stride: {args.vid_stride})")
 
