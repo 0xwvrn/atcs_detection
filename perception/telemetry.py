@@ -118,6 +118,7 @@ class NonBlockingTelemetryBridge:
             "Q": int(smoothed_q["Q_stopline"]),
             "PCU": round(float(smoothed_q["PCU_stopline"]), 2),
             "D_tail_m": round(float(smoothed_q["D_tail_m"]), 2),
+            "inflow_pcu": round(float(smoothed_q.get("inflow_pcu", 0.0)), 2),
             "valid": is_packet_valid,
         }
         json_str = json.dumps(telemetry) + "\n"

@@ -309,8 +309,10 @@ class LaneAwareQueueEstimator:
         tail_stopline_m: float,
         q_upstream: int,
         pcu_upstream: float,
+        moving_inflow_pcu: float = 0.0,
     ) -> Dict[str, Any]:
-        self.history.append((q_stopline, pcu_stopline, tail_stopline_m, q_upstream, pcu_upstream))
+        inflow_pcu = max(0.0, float(pcu_upstream) + float(moving_inflow_pcu))
+        self.history.append((q_stopline, pcu_stopline, tail_stopline_m, q_upstream, pcu_upstream, inflow_pcu))
         rows = list(self.history)
         median_count = int(np.median([r[0] for r in rows]))
         best_row = rows[-1]
@@ -330,4 +332,5 @@ class LaneAwareQueueEstimator:
             "D_tail_m": round(float(best_row[2]), 2),
             "Q_upstream": int(best_row[3]),
             "PCU_upstream": round(float(best_row[4]), 2),
+            "inflow_pcu": round(float(best_row[5]), 2),
         }

@@ -67,7 +67,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="", help="Compute device: 'mps', 'cuda:0', 'cpu', or '' (auto).")
     parser.add_argument("--serial-port", type=str, default="/dev/cu.usbmodem5B900309611", help="Serial port of ESP32-S3.")
     parser.add_argument("--baudrate", type=int, default=115200, help="Serial baud rate (default: 115200).")
-    parser.add_argument("--approach-leg", type=str, default="N", choices=["N", "S", "E", "W"], help="Monitored approach (default: N).")
+    parser.add_argument("--approach-leg", type=str, default="N", choices=["N", "S", "E", "W", "NE", "NW", "SE", "SW"], help="Monitored approach (default: N).")
     parser.add_argument("--calib-file", type=str, default="", help="Path to 4-point homography calibration JSON.")
     parser.add_argument("--num-lanes", type=int, default=2, help="Number of approach lanes (default: 2).")
     parser.add_argument("--max-vehicle-gap-m", type=float, default=6.0, help="Max bumper clearance gap in queue (default: 6.0m).")
@@ -110,14 +110,10 @@ def get_model_class_name(names, cls_id: int) -> str:
 
 
 def run_perception(args):
-    print("==================================================")
-    print("  ATCS Traffic Perception Pipeline (v4.0)")
-    print(f"  Weights:    {args.weights}")
-    print(f"  Source:     {args.source}")
-    print(f"  Approach:   {args.approach_leg} | Lanes: {args.num_lanes}")
-    print(f"  Max Gap:    {args.max_vehicle_gap_m}m | Stopline Thresh: {args.stopline_threshold_m}m")
-    print(f"  Tx Rate:    {args.telemetry_rate} Hz | Port: {args.serial_port}")
-    print("==================================================")
+    print(
+        f"# ATCS Traffic Perception Pipeline (v4.0) | Approach={args.approach_leg} "
+        f"| Lanes={args.num_lanes} | Tx={args.telemetry_rate}Hz | Port={args.serial_port}"
+    )
 
     try:
         from ultralytics import YOLO
@@ -185,6 +181,7 @@ def run_perception(args):
             )
 
             vehicles_by_lane = defaultdict(list)
+            moving_inflow_pcu = 0.0
 
             if results[0].boxes and results[0].boxes.id is not None:
                 boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -215,9 +212,11 @@ def run_perception(args):
 
                     if is_queued:
                         vehicles_by_lane[lane_id].append((dist_m, track.pcu, tid, (x1, y1, x2, y2), track.class_name))
-                    elif not args.no_show:
-                        speed_kmh = (speed_mps * 3.6) if (speed_mps is not None and np.isfinite(speed_mps)) else 0.0
-                        draw_moving_vehicle(frame, (x1, y1, x2, y2), lane_id, tid, speed_kmh)
+                    else:
+                        moving_inflow_pcu += track.pcu
+                        if not args.no_show:
+                            speed_kmh = (speed_mps * 3.6) if (speed_mps is not None and np.isfinite(speed_mps)) else 0.0
+                            draw_moving_vehicle(frame, (x1, y1, x2, y2), lane_id, tid, speed_kmh)
 
             # Purge stale tracks not observed within 2.5s
             active_tracks = {tid: t for tid, t in active_tracks.items() if t_src - t.last_seen_time < 2.5}
@@ -232,7 +231,7 @@ def run_perception(args):
             raw_q_up = sum(lq.upstream_count for lq in lane_queues.values())
             raw_pcu_up = sum(lq.upstream_pcu for lq in lane_queues.values())
 
-            smoothed_q = estimator.smooth(raw_q_stop, raw_pcu_stop, raw_tail, raw_q_up, raw_pcu_up)
+            smoothed_q = estimator.smooth(raw_q_stop, raw_pcu_stop, raw_tail, raw_q_up, raw_pcu_up, moving_inflow_pcu)
 
             # Rate-limited telemetry transmission
             now_s = time.time()
