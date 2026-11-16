@@ -140,6 +140,17 @@ def parse_args():
         action="store_true",
         help="Resume training from the most recent checkpoint.",
     )
+    parser.add_argument(
+        "--multiclass",
+        action="store_true",
+        help="Use canonical multiclass dataset config (configs/data_multiclass.yaml) and run name.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible training (default: 42).",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +164,13 @@ def main():
         print("Error: Ultralytics is not installed. Run: pip install -r requirements.txt")
         sys.exit(1)
 
+    base_dir = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name in ("training", "inference") else Path(__file__).resolve().parent
+    if args.multiclass:
+        if "--data" not in sys.argv:
+            args.data = str(base_dir / "configs" / "data_multiclass.yaml")
+        if "--name" not in sys.argv:
+            args.name = "atcs_multiclass_p2_960"
+
     device = args.device if args.device is not None else detect_device()
     data_yaml = Path(args.data).resolve()
 
@@ -160,20 +178,29 @@ def main():
         print(f"Error: Dataset YAML not found at: {data_yaml}")
         sys.exit(1)
 
-    print("=" * 70)
-    print(" ATCS High-Recall Vehicle Detector Training (Memory-Safe Mode)")
-    print("=" * 70)
+    if args.multiclass:
+        import yaml
+        if str(base_dir) not in sys.path:
+            sys.path.insert(0, str(base_dir))
+        from perception.vehicle_taxonomy import CANONICAL_ID_TO_NAME
+        cfg = yaml.safe_load(data_yaml.read_text()) or {}
+        names = cfg.get("names", {})
+        parsed_names = {int(k): str(v) for k, v in names.items()} if isinstance(names, dict) else {i: str(v) for i, v in enumerate(names)}
+        if parsed_names != CANONICAL_ID_TO_NAME:
+            print(f"Error: {data_yaml} names {parsed_names} do not match canonical taxonomy {CANONICAL_ID_TO_NAME}")
+            sys.exit(1)
+
+    print("ATCS High-Recall Vehicle Detector Training (Memory-Safe Mode)")
     print(f" Model Architecture:  {args.model}")
     print(f" Dataset Config:      {data_yaml}")
     print(f" Target Device:       {device.upper()}")
     print(f" Image Resolution:    {args.imgsz}px (Rectangular: {args.rect})")
-    print(f" Safe Batch Size:     {args.batch} (Gradient Accumulation Active)")
+    print(f" Safe Batch Size:     {args.batch}")
     print(f" Epochs:              {args.epochs} (Close-mosaic: {args.close_mosaic})")
     print(f" Optimizer:           {args.optimizer} (Cosine LR: {args.cos_lr})")
-    print(f" Loss Weights:        cls={args.cls} (Recall-Boosted), box={args.box}, dfl={args.dfl}")
-    print(f" DataLoader Workers:  {args.workers} (RAM-Safe Mode, cache=False)")
+    print(f" Loss Weights:        cls={args.cls}, box={args.box}, dfl={args.dfl}")
+    print(f" Seed / Workers:      seed={args.seed}, workers={args.workers}, cache=False")
     print(f" Output Project:      {args.project}/{args.name}")
-    print("=" * 70)
 
     # Loads custom architecture with pretrained backbone weights if yaml specified
     if args.model.endswith(".yaml"):
@@ -197,6 +224,7 @@ def main():
         close_mosaic=args.close_mosaic,
         device=device,
         workers=args.workers,
+        seed=args.seed,
         cache=False,
         project=args.project,
         name=args.name,

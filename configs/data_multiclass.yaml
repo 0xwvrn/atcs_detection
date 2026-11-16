@@ -1,0 +1,15 @@
+path: /Users/dhritiman/Documents/dev/atcs/vision/dataset_multiclass
+train: images/train
+val: images/val
+test: images/test
+nc: 9
+names:
+  0: car
+  1: bus
+  2: motorcycle
+  3: auto_rickshaw
+  4: van
+  5: truck
+  6: bicycle
+  7: pedestrian
+  8: people

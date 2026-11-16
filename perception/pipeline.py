@@ -84,6 +84,13 @@ def parse_args():
     parser.add_argument("--allow-approx-calib", action="store_true", help="Permit default geometric trapezoid for valid telemetry.")
     parser.add_argument("--telemetry-rate", type=float, default=2.0, help="Telemetry transmission rate in Hz (default: 2.0).")
     parser.add_argument("--no-show", action="store_true", help="Disable interactive OpenCV visualization window.")
+    parser.add_argument(
+        "--model-mode",
+        type=str,
+        default="auto",
+        choices=["auto", "single_class", "multiclass"],
+        help="Model class interpretation: 'auto' (from model.names), 'single_class', or 'multiclass'.",
+    )
     return parser.parse_args()
 
 
@@ -166,7 +173,13 @@ def run_perception(args):
 
     model = YOLO(args.weights)
     names_list = list(model.names.values()) if isinstance(model.names, dict) else list(model.names)
-    is_multiclass = len(names_list) > 1 and not (len(names_list) == 1 and names_list[0] == "vehicle")
+    model_mode = getattr(args, "model_mode", "auto")
+    if model_mode == "single_class":
+        is_multiclass = False
+    elif model_mode == "multiclass":
+        is_multiclass = True
+    else:
+        is_multiclass = len(names_list) > 1 and not (len(names_list) == 1 and names_list[0] == "vehicle")
 
     bridge = None
     cap = None

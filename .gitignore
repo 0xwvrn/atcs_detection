@@ -6,6 +6,7 @@ venv/
 env/
 dataset/
 datasets/
+dataset_multiclass/
 runs/
 *.pt
 *.onnx
