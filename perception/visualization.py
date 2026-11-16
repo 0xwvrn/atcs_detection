@@ -39,13 +39,15 @@ def draw_queued_vehicle(
     category_label: str,
     dist_m: float,
     is_stopline: bool,
+    is_calibrated: bool = True,
 ):
     """Draws colored box for stationary vehicle (Green: Stopline queue, Cyan: Upstream queue)."""
     x1, y1, x2, y2 = box
     color = (0, 255, 128) if is_stopline else (255, 200, 0)
     prefix = "Q-L" if is_stopline else "UP-L"
+    dist_tag = f" {dist_m:.1f}m" if is_calibrated else " (uncal)"
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    _put_text(frame, f"{prefix}{lane_id} ID:{tid} [{category_label}] {dist_m:.1f}m", (x1, max(18, y1 - 6)), 0.48, color, 2)
+    _put_text(frame, f"{prefix}{lane_id} ID:{tid} [{category_label}]{dist_tag}", (x1, max(18, y1 - 6)), 0.48, color, 2)
 
 
 def draw_heads_up_display(
@@ -70,8 +72,9 @@ def draw_heads_up_display(
     _put_text(frame, f"APPROACH [{approach_leg}] STOPLINE: {smoothed_q['Q_stopline']} ({lanes_str}) | UPSTREAM: {smoothed_q['Q_upstream']} | DEMAND: {smoothed_q['PCU_stopline']} PCU", (15, 26), 0.54, q_color, 2)
 
     calib_str = "CALIBRATION LOADED" if is_calibrated else ("APPROX CALIB ALLOWED" if allow_approx_calib else "UNCONFIGURED APPROX")
+    tail_str = f"{smoothed_q['D_tail_m']}m" if is_calibrated else "N/A (uncal)"
     echo_str = f" | ECHO: {feedback}" if feedback else ""
-    _put_text(frame, f"TAIL: {smoothed_q['D_tail_m']}m | TIME: {t_src:.1f}s | CALIB: {calib_str}{echo_str}", (15, 52), 0.50, (200, 200, 200), 1)
+    _put_text(frame, f"TAIL: {tail_str} | TIME: {t_src:.1f}s | CALIB: {calib_str}{echo_str}", (15, 52), 0.50, (200, 200, 200), 1)
 
     link_str = "HW SERIAL ONLINE" if is_connected else "STANDALONE"
     link_color = (0, 255, 0) if is_connected else (0, 165, 255)
